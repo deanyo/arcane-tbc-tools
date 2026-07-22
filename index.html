@@ -3410,24 +3410,32 @@ function wclRender(kills) {
     byBoss.get(k.boss).push(k);
   }
   const median = a => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
-  let html = `<table><thead><tr><th>Boss</th><th>Kills</th><th>Lust went out</th><th>Preset pin</th><th></th></tr></thead><tbody>`;
+  const facts = fightFacts();
+  let html = `<table><thead><tr><th>Boss</th><th>Kills</th><th>Lust went out</th><th>Preset uses</th><th></th></tr></thead><tbody>`;
   for (const [boss, ks] of byBoss) {
     const preset = wclPresetFor(boss);
-    const pin = preset && preset.pins && preset.pins.bloodlust ? preset.pins.bloodlust[0] : null;
+    const name = preset ? preset.name : boss;
+    const fact = facts[name] || {};
+    const pin = fact.lustAt != null ? fact.lustAt
+      : preset && preset.pins && preset.pins.bloodlust ? preset.pins.bloodlust[0] : null;
     const lusted = ks.filter(k => k.lustAt !== null);
     const medLust = lusted.length ? median(lusted.map(k => k.lustAt)) : null;
-    // flag when the preset's pinned call disagrees with how the guild actually lusts
+    const medDur = median(ks.map(k => k.dur));
+    // flag when the preset's call disagrees with how the guild actually lusts
     let lustCell = medLust !== null ? `~${fmtT(medLust)}` : `<span class="warntag">not seen</span>`;
-    let pinCell = pin !== null ? fmtT(pin) : "—";
-    if (pin !== null && medLust !== null && Math.abs(medLust - pin) > 15) {
-      pinCell += ` <span class="warntag">⚠ logs say ~${fmtT(medLust)} — update the preset's pin</span>`;
-    }
+    let pinCell = pin !== null ? fmtT(pin) + (fact.lustAt != null ? " (learned)" : "") : "—";
+    const stale = pin !== null && medLust !== null && Math.abs(medLust - pin) > 15;
+    if (stale) pinCell += ` <span class="warntag">⚠ logs say ~${fmtT(medLust)}</span>`;
     html += `<tr><td>${esc(boss)}</td><td class="num">${ks.map(k => fmtT(k.dur)).join(", ")}</td>` +
       `<td class="num">${lustCell}</td><td class="num">${pinCell}</td>` +
-      `<td><button type="button" class="pinadd wcl-import" data-boss="${esc(boss)}" data-durs="${ks.map(k => k.dur).join(",")}">→ kill history</button></td></tr>`;
+      `<td><button type="button" class="pinadd wcl-import" data-boss="${esc(boss)}" data-durs="${ks.map(k => k.dur).join(",")}"` +
+      ` data-medlust="${medLust !== null ? medLust : ""}" data-meddur="${medDur}">${preset ? "→ preset + history" : "→ kill history"}</button></td></tr>`;
   }
   html += `</tbody></table>`;
   el("wcl-out").innerHTML = html;
+  // One click teaches the tool this boss: kill durations feed the explorer's
+  // history, and (for a known preset) the median kill length + real Lust second
+  // are saved as fight facts the preset applies on every future load.
   el("wcl-out").querySelectorAll(".wcl-import").forEach(b => b.addEventListener("click", () => {
     const st = killxStore(); if (st === null) return;
     const preset = wclPresetFor(b.dataset.boss);
@@ -3435,8 +3443,17 @@ function wclRender(kills) {
     const cur = new Set(st[boss] || []);
     for (const d of b.dataset.durs.split(",").map(Number)) cur.add(d);
     st[boss] = [...cur];
-    if (killxSave(st)) {
-      b.textContent = "added ✓";
+    let ok = killxSave(st);
+    if (preset) {
+      const facts2 = fightFacts();
+      facts2[boss] = {
+        T: parseInt(b.dataset.meddur, 10),
+        ...(b.dataset.medlust !== "" ? { lustAt: parseInt(b.dataset.medlust, 10) } : {}),
+      };
+      ok = fightFactsSave(facts2) && ok;
+    }
+    if (ok) {
+      b.textContent = "saved ✓";
       if (lastRun && killx.geo) { killxDraw(lastRun, killx.geo.lo, killx.geo.hi); killxVerdict(lastRun, killx.geo.lo, killx.geo.hi); }
     }
   }));
@@ -3847,20 +3864,40 @@ const T6_DRAFT_PRESETS = [
 */
 window.BOSS_PRESETS = BOSS_PRESETS;
 window.GOLDEN_DEFAULTS = GOLDEN_DEFAULTS;
+// Per-boss fight-fact overrides learned from the user's own logs (via the
+// Warcraft Logs panel): { [presetName]: { T, lustAt } }. Merged over the baked
+// preset whenever it loads, so log-derived timings never require code edits.
+const FACTS_KEY = "abp-fight-facts";
+function fightFacts() { try { return JSON.parse(localStorage.getItem(FACTS_KEY) || "{}"); } catch (_) { return {}; } }
+function fightFactsSave(o) { try { localStorage.setItem(FACTS_KEY, JSON.stringify(o)); return true; } catch (_) { return false; } }
 // Convert a preset's raw setup into the UI's applyState() shape (m:ss strings, buff toggles).
-function goldenToState(p) {
+// fightOnly (boss presets): the preset describes the FIGHT — length, pins, phases — and leaves
+// the CHARACTER (kit, gear, Cold Snap) exactly as the user has it. Debugging presets load the
+// full frozen setup: they are the regression suite and must reproduce exactly.
+function goldenToState(p, fightOnly) {
+  const facts = fightOnly ? fightFacts()[p.name] : null;
+  const pins = { ...(p.pins || {}) };
+  if (facts && facts.lustAt != null) pins.bloodlust = [facts.lustAt];
+  const T = facts && facts.T != null ? facts.T : p.T;
+  const times = {};
+  for (const [k, arr] of Object.entries(pins)) times[k] = arr.map(fmtT).join(", ");
+  const rawPhases = p.phases || (p.intermission ? [{ type: "intermission", from: p.intermission[0], to: p.intermission[1] }] : []);
+  const phases = rawPhases.map(x => ({ type: x.type, from: fmtT(x.from), to: fmtT(x.to), mult: x.mult || 2, targets: x.targets || 4 }));
+  if (fightOnly) {
+    return {
+      enabled: { ...state.enabled }, coldSnap: state.coldSnap, times,
+      complicated: phases.length > 0, phases,
+      haste: el("in-haste").value, len: fmtT(T), sp: el("in-sp").value, crit: el("in-crit").value,
+    };
+  }
   const g = { ...GOLDEN_DEFAULTS.gear, ...(p.gear || {}) };
   const kit = p.kit || GOLDEN_DEFAULTS.kit;
   const enabled = {};
   for (const k in BUFFS) enabled[k] = kit.includes(k);
-  const times = {};
-  for (const [k, arr] of Object.entries(p.pins || {})) times[k] = arr.map(fmtT).join(", ");
-  const rawPhases = p.phases || (p.intermission ? [{ type: "intermission", from: p.intermission[0], to: p.intermission[1] }] : []);
-  const phases = rawPhases.map(x => ({ type: x.type, from: fmtT(x.from), to: fmtT(x.to), mult: x.mult || 2, targets: x.targets || 4 }));
   return {
     enabled, coldSnap: g.coldSnap !== false, times,
     complicated: phases.length > 0, phases,
-    haste: String(g.haste || 0), len: fmtT(p.T), sp: String(g.sp), crit: String(g.crit),
+    haste: String(g.haste || 0), len: fmtT(T), sp: String(g.sp), crit: String(g.crit),
   };
 }
 function clearGoldenActive() {
@@ -3868,7 +3905,7 @@ function clearGoldenActive() {
 }
 // Render a baked preset array (Boss or Debugging) into a chip strip. Both load the fight's
 // INPUTS only (no auto-run); press "Find optimal overlay" to COMPUTE the plan — nothing preloaded.
-function renderBakedPresets(presets, hostId) {
+function renderBakedPresets(presets, hostId, fightOnly) {
   const host = el(hostId);
   if (!host) return;
   host.innerHTML = presets.map((p, i) =>
@@ -3876,7 +3913,7 @@ function renderBakedPresets(presets, hostId) {
   ).join("");
   host.querySelectorAll(".gchip").forEach(chip => {
     const load = () => {
-      applyState(goldenToState(presets[+chip.dataset.i]));       // load the fight's INPUTS only
+      applyState(goldenToState(presets[+chip.dataset.i], fightOnly)); // load the fight's INPUTS only
       refreshPresets("");                                         // clear any active user preset
       clearGoldenActive();
       chip.classList.add("active");
@@ -3895,8 +3932,8 @@ function renderBakedPresets(presets, hostId) {
 buildBuffList();
 el("in-haste").dispatchEvent(new Event("input"));
 refreshPresets("");
-renderBakedPresets(BOSS_PRESETS, "boss-chips");
-renderBakedPresets(GOLDEN_PRESETS, "golden-chips");
+renderBakedPresets(BOSS_PRESETS, "boss-chips", true);   // fight facts only — your kit/gear stay put
+renderBakedPresets(GOLDEN_PRESETS, "golden-chips", false); // frozen full setups: the regression suite
 </script>
 </body>
 </html>
