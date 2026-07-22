@@ -2335,7 +2335,7 @@ function optimizeAsync(cfg, starts, onProgress) {
 const el = id => document.getElementById(id);
 const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 const state = {
-  enabled: { bloodlust: true, icyVeins: true, drums: true, ati: false, skull: true, arcanePower: true, scb: true, berserking: false, mqg: false, powerInfusion: false, isc: false },
+  enabled: { bloodlust: true, icyVeins: true, drums: true, ati: false, skull: false, arcanePower: true, scb: true, berserking: false, mqg: false, powerInfusion: false, isc: true },
   coldSnap: true,
   times: Object.fromEntries(Object.keys(BUFFS).filter(k => BUFFS[k].kind !== "proc").map(k => [k, ""])),
   complicated: false,
@@ -3457,6 +3457,14 @@ async function wclFillStats(id, secret, guildId, charName, status) {
     el("in-haste").value = ci.hasteSpell || 0; filled.push(`${ci.hasteSpell || 0} haste rating`);
     const critLabel = critSources.length ? ` + ${critSources.join(" + ")}` : "";
     el("in-crit").value = (Math.round(crit * 2) / 2).toFixed(1); filled.push(`~${(Math.round(crit * 2) / 2).toFixed(1)}% crit (rating + int${critLabel} — estimate, nudge if your sheet disagrees)`);
+    // Set the trinket toggles from what you actually wore in that kill
+    const gearIds = new Set((ci.gear || []).map(g => g.id));
+    const worn = TRINKETS.filter(k => gearIds.has(WCL_TRINKET_ITEMS[k]));
+    if (worn.length) {
+      for (const k of TRINKETS) state.enabled[k] = worn.includes(k);
+      buildBuffList();
+      filled.push(`trinkets: ${worn.map(k => BUFFS[k].name).join(" + ")}`);
+    }
     el("in-haste").dispatchEvent(new Event("input"));
     markPresetDirty();
     return `filled from ${charName}'s latest kill: ${filled.join(", ")}`;
@@ -3473,6 +3481,14 @@ const WCL_BUFF_TO_KEY = {
   20554: "berserking", 26297: "berserking", 26296: "berserking", 23723: "mqg",
 };
 const WCL_COLDSNAP = 11958, WCL_MANA_GEM = 27103; // casts, not auras
+// Planner trinket key → item id, for reading equipped trinkets off the gear list
+const WCL_TRINKET_ITEMS = {
+  isc: 29370,   // Icon of the Silver Crescent
+  skull: 32483, // The Skull of Gul'dan
+  ati: 32488,   // Ashtongue Talisman of Insight
+  scb: 30720,   // Serpent-Coil Braid
+  mqg: 19339,   // Mind Quickening Gem
+};
 async function wclReview(kill, charName, status) {
   const c = wclCreds();
   const token = await wclToken(c.id, c.secret);
@@ -3949,7 +3965,7 @@ el("preset-name").addEventListener("keydown", e => { if (e.key === "Enter") { e.
 // history, learned fight facts, and WCL credentials are deliberately kept —
 // this un-messes the current setup, it doesn't forget what the tool learned.
 const FACTORY_STATE = {
-  enabled: { bloodlust: true, icyVeins: true, drums: true, ati: false, skull: true, arcanePower: true, scb: true, berserking: false, mqg: false, powerInfusion: false, isc: false },
+  enabled: { bloodlust: true, icyVeins: true, drums: true, ati: false, skull: false, arcanePower: true, scb: true, berserking: false, mqg: false, powerInfusion: false, isc: true },
   coldSnap: true, times: {}, complicated: false, phases: [],
   haste: "0", len: "5:00", sp: "1150", crit: "25",
 };
