@@ -16,6 +16,13 @@ A single-file, zero-dependency planner that finds the optimal cooldown overlay f
 
 Everything runs client-side; the file also works opened directly from disk (offline at the raid).
 
+Additions built on top of the engine (see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full map):
+
+- **Kill-time explorer** — after each run, the plan is re-optimized across nearby fight lengths and drawn as a gain-vs-kill-time chart, with cliff markers where an extra cooldown use fits and your logged kills overlaid. Answers "is my kill time near a breakpoint?" at a glance.
+- **Warcraft Logs integration** — guild kill times (with when Bloodlust actually went out, flagged if a preset's pin disagrees), one-click gear-stat fill from your latest logged kill, and *review a kill*: your actual presses scored against the optimal plan for that fight.
+- **Learning presets** — boss presets describe the fight only (length, Lust call, phases) and leave your character setup alone; importing from Warcraft Logs teaches them your guild's real timings. No hand-edited data.
+- **Model assumptions** live on [assumptions.html](https://dnyo.co.uk/arcane-tbc-tools/assumptions.html).
+
 ### Engine provenance
 
 The simulation engine and optimizer are authored and iterated separately, verified against a headless [wowsims](https://wowsims.github.io/tbc/) build, and guarded by a frozen golden-preset regression suite (`window.GOLDEN_PRESETS` — a confirmed preset *is* the test). Changes in this repo stay out of the engine: UI panels, data (presets, item definitions), and integrations only. The `docs/` and `tests/` referenced in engine comments live with the author and can land here later.
