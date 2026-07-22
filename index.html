@@ -582,19 +582,23 @@
         </div>
       </div>
       <details class="capsheet" id="wclpanel">
-        <summary>Warcraft Logs — fetch guild kill times</summary>
-        <p class="note">Pulls your guild's recent kills (durations + when Bloodlust actually went out) straight from
-        the Warcraft Logs API into the kill-time explorer. Needs a free API client from
+        <summary>Warcraft Logs — kill times, your stats, review a kill</summary>
+        <p class="note">Talks to the Warcraft Logs API directly: guild kill times (with when Bloodlust actually went out)
+        feed the kill-time explorer, <b>My stats</b> fills the gear inputs from your latest logged kill, and clicking any
+        fetched kill <b>reviews it</b> — your actual presses scored against the optimal plan. Needs a free API client from
         <a href="https://www.warcraftlogs.com/api/clients" target="_blank" rel="noopener" style="color:var(--accent)">warcraftlogs.com/api/clients</a> —
         credentials stay in this browser's localStorage only. Anyone with your secret can spend your API quota, so don't reuse a shared one.</p>
         <div class="killx-bar">
-          <input id="wcl-id" type="text" placeholder="client id" autocomplete="off" style="width:170px">
-          <input id="wcl-secret" type="password" placeholder="client secret" autocomplete="off" style="width:170px">
-          <input id="wcl-guild" type="text" placeholder="guild id" inputmode="numeric" style="width:90px" value="807668">
+          <input id="wcl-id" type="text" placeholder="client id" autocomplete="off" style="width:150px">
+          <input id="wcl-secret" type="password" placeholder="client secret" autocomplete="off" style="width:150px">
+          <input id="wcl-guild" type="text" placeholder="guild id" inputmode="numeric" style="width:80px" value="807668">
+          <input id="wcl-char" type="text" placeholder="character" autocomplete="off" style="width:110px">
           <button id="wcl-fetch" type="button">Fetch recent kills</button>
+          <button id="wcl-stats" type="button" title="Fill spell damage / crit / haste from your latest logged kill">My stats</button>
           <span class="kprog" id="wcl-status"></span>
         </div>
         <div class="tablebox" id="wcl-out"></div>
+        <div id="wcl-review"></div>
       </details>
       <details class="capsheet" id="capsheet" hidden>
         <summary>Cap sheet — 3-stack Arcane Blast cast time per buff combo</summary>
@@ -3362,7 +3366,7 @@ async function wclToken(id, secret) {
   });
   if (!res.ok) throw new Error(`token request failed (${res.status}) — check the client id/secret`);
   const j = await res.json();
-  localStorage.setItem(WCL_KEY, JSON.stringify({ id, secret, token: j.access_token, tokenId: id, exp: Date.now() + (j.expires_in || 3600) * 1000 }));
+  localStorage.setItem(WCL_KEY, JSON.stringify({ ...wclCreds(), id, secret, token: j.access_token, tokenId: id, exp: Date.now() + (j.expires_in || 3600) * 1000 }));
   return j.access_token;
 }
 async function wclQuery(token, query, variables) {
@@ -3381,11 +3385,11 @@ async function wclFetchKills(id, secret, guildId, status) {
   status("fetching report list…");
   const list = await wclQuery(token, `query($g:Int){reportData{reports(guildID:$g, limit:6){data{code startTime endTime}}}}`, { g: guildId });
   const reports = (list.reportData.reports.data || []);
-  const kills = []; // {boss, dur, lustAt|null, when}
+  const kills = []; // {boss, dur, lustAt|null, when, code, fightID}
   for (const [i, r] of reports.entries()) {
     status(`reading report ${i + 1}/${reports.length}…`);
     const d = await wclQuery(token, `query($c:String!, $end:Float!){reportData{report(code:$c){
-      fights(killType: Kills){encounterID name startTime endTime}
+      fights(killType: Kills){id encounterID name startTime endTime}
       events(dataType: Casts, startTime: 0, endTime: $end, filterExpression: "ability.id IN (${WCL_LUST_IDS.join(",")})", limit: 300){data}
     }}}`, { c: r.code, end: r.endTime - r.startTime });
     const rep = d.reportData.report;
@@ -3398,10 +3402,161 @@ async function wclFetchKills(id, secret, guildId, status) {
         dur: Math.round((f.endTime - f.startTime) / 1000),
         lustAt: lust !== undefined ? Math.round((lust - f.startTime) / 1000) : null,
         when: new Date(r.startTime + f.startTime).toISOString().slice(0, 10),
+        code: r.code, fightID: f.id, fightStart: f.startTime,
       });
     }
   }
   return kills;
+}
+// Find the named character's actor id in a report (case-insensitive).
+async function wclActor(token, code, charName) {
+  const d = await wclQuery(token, `query($c:String!){reportData{report(code:$c){masterData{actors(type:"Player"){id name}}}}}`, { c: code });
+  const actors = d.reportData.report.masterData.actors || [];
+  const a = actors.find(x => wclNorm(x.name) === wclNorm(charName));
+  if (!a) throw new Error(`"${charName}" not found in that report — check the character name`);
+  return a.id;
+}
+
+/* ——— My stats: gear inputs from the latest logged kill ——— */
+// combatantinfo carries crit/haste RATINGS + intellect; spell power rides on
+// the player's cast events (value at that cast — take the earliest, before
+// on-use trinkets inflate it). Crit% is assembled from rating + int + the
+// standard raiding-arcane constants, so it's an estimate — shown as such.
+const WCL_CRIT_RATING_PER_PCT = 22.08; // at 70
+const WCL_MAGE_BASE_CRIT = 0.91, WCL_INT_PER_CRIT = 80;
+const WCL_MOLTEN_ARMOR = 30482; // +3% spell crit if up at pull
+async function wclFillStats(id, secret, guildId, charName, status) {
+  const token = await wclToken(id, secret);
+  status("finding your latest kill…");
+  const list = await wclQuery(token, `query($g:Int){reportData{reports(guildID:$g, limit:3){data{code endTime startTime}}}}`, { g: guildId });
+  for (const r of list.reportData.reports.data || []) {
+    const fd = await wclQuery(token, `query($c:String!){reportData{report(code:$c){fights(killType: Kills){id startTime endTime}}}}`, { c: r.code });
+    const fights = fd.reportData.report.fights || [];
+    if (!fights.length) continue;
+    const f = fights[fights.length - 1];
+    const actorId = await wclActor(token, r.code, charName);
+    status("reading combatant info…");
+    const d = await wclQuery(token, `query($c:String!, $s:Float!, $e:Float!, $a:Int!){reportData{report(code:$c){
+      ci: events(dataType: CombatantInfo, startTime: $s, endTime: $e, sourceID: $a, limit: 10){data}
+      casts: events(dataType: Casts, startTime: $s, endTime: $e, sourceID: $a, limit: 40){data}
+    }}}`, { c: r.code, s: f.startTime, e: f.endTime, a: actorId });
+    const rep = d.reportData.report;
+    const ci = (rep.ci.data || []).find(e => e.type === "combatantinfo");
+    if (!ci) throw new Error("no combatant info for that character in the latest kill");
+    const firstCast = (rep.casts.data || []).find(e => e.type === "cast" && e.spellPower > 0);
+    const moltenUp = (ci.auras || []).some(a => a.ability === WCL_MOLTEN_ARMOR);
+    const crit = WCL_MAGE_BASE_CRIT + (ci.intellect || 0) / WCL_INT_PER_CRIT +
+      (ci.critSpell || 0) / WCL_CRIT_RATING_PER_PCT + (moltenUp ? 3 : 0);
+    const filled = [];
+    if (firstCast) { el("in-sp").value = firstCast.spellPower; filled.push(`${firstCast.spellPower} spell damage`); }
+    el("in-haste").value = ci.hasteSpell || 0; filled.push(`${ci.hasteSpell || 0} haste rating`);
+    el("in-crit").value = (Math.round(crit * 2) / 2).toFixed(1); filled.push(`~${(Math.round(crit * 2) / 2).toFixed(1)}% crit (rating + int${moltenUp ? " + Molten Armor" : ""} — estimate, nudge if your sheet disagrees)`);
+    el("in-haste").dispatchEvent(new Event("input"));
+    markPresetDirty();
+    return `filled from ${charName}'s latest kill: ${filled.join(", ")}`;
+  }
+  throw new Error("no kills found in the recent reports");
+}
+
+/* ——— Review a kill: your actual presses vs the optimal plan ——— */
+// Buff-aura → planner track. Trinket/spell activations are read as applybuff
+// on the player; Cold Snap and gem use are casts (no aura).
+const WCL_BUFF_TO_KEY = {
+  12472: "icyVeins", 12042: "arcanePower", 35163: "isc", 40396: "skull",
+  2825: "bloodlust", 32182: "bloodlust", 10060: "powerInfusion", 35476: "drums",
+  20554: "berserking", 26297: "berserking", 26296: "berserking", 23723: "mqg",
+};
+const WCL_COLDSNAP = 11958, WCL_MANA_GEM = 27103; // casts, not auras
+async function wclReview(kill, charName, status) {
+  const c = wclCreds();
+  const token = await wclToken(c.id, c.secret);
+  status("finding your character…");
+  const actorId = await wclActor(token, kill.code, charName);
+  status("reading your presses…");
+  const buffIds = Object.keys(WCL_BUFF_TO_KEY).join(",");
+  const d = await wclQuery(token, `query($c:String!, $f:[Int]!){reportData{report(code:$c){
+    buffs: events(dataType: Buffs, fightIDs: $f, startTime: 0, endTime: 999999999,
+      filterExpression: "target.id = ${actorId} AND type = 'applybuff' AND ability.id IN (${buffIds})", limit: 500){data}
+    casts: events(dataType: Casts, fightIDs: $f, startTime: 0, endTime: 999999999,
+      filterExpression: "source.id = ${actorId} AND ability.id IN (${WCL_COLDSNAP},${WCL_MANA_GEM})", limit: 100){data}
+  }}}`, { c: kill.code, f: [kill.fightID] });
+  const rep = d.reportData.report;
+  const actual = {}; // {key: [seconds]}
+  const push = (key, ts) => {
+    const t = Math.round((ts - kill.fightStart) / 1000);
+    (actual[key] = actual[key] || []).push(t);
+  };
+  for (const e of rep.buffs.data || []) {
+    const key = WCL_BUFF_TO_KEY[e.abilityGameID];
+    if (key) push(key, e.timestamp);
+  }
+  const coldSnaps = [];
+  for (const e of rep.casts.data || []) {
+    if (e.type !== "cast") continue;
+    if (e.abilityGameID === WCL_MANA_GEM) push("scb", e.timestamp);
+    if (e.abilityGameID === WCL_COLDSNAP) coldSnaps.push(Math.round((e.timestamp - kill.fightStart) / 1000));
+  }
+  for (const k in actual) actual[k] = [...new Set(actual[k])].sort((a, b) => a - b);
+  return { actual, coldSnaps };
+}
+function wclRenderReview(kill, actual, coldSnaps, cfg, actualR, optR, best) {
+  const crit = Math.min(1, Math.max(0, cfg.critPct / 100));
+  const plainCast = (GAME.AB.AVG_BASE_DMG + GAME.AB.COEF * cfg.sp) * (1 + crit * (GAME.CRIT_MULT - 1));
+  const gap = optR.total - actualR.total;
+  const pct = optR.total > 0 ? 100 * actualR.total / optR.total : 0;
+  const keys = [...new Set([...Object.keys(best.s), ...Object.keys(actual)])]
+    .filter(k => BUFFS[k]).sort((a, b) => LANE_ORDER.indexOf(a) - LANE_ORDER.indexOf(b));
+  let rows = "";
+  for (const k of keys) {
+    const plan = (best.s[k] || []).map(Math.round);
+    const act = actual[k] || [];
+    let note = "";
+    if (act.length < plan.length) note = `<span class="warntag">${plan.length - act.length} use${plan.length - act.length > 1 ? "s" : ""} missed</span>`;
+    else if (act.length && plan.length) {
+      const drift = Math.max(...act.slice(0, plan.length).map((t, i) => Math.abs(t - plan[i])));
+      if (drift > 10) note = `<span class="warntag">up to ${drift}s off plan</span>`;
+      else note = `<span style="color:var(--good)">on plan</span>`;
+    } else if (act.length && !plan.length) note = `not in the plan`;
+    rows += `<tr><td>${iconOf(k, 22)}${BUFFS[k].name}</td>` +
+      `<td class="num">${plan.length ? plan.map(fmtT).join(", ") : "—"}</td>` +
+      `<td class="num">${act.length ? act.map(fmtT).join(", ") : `<span class="warntag">never</span>`}</td>` +
+      `<td>${note}</td></tr>`;
+  }
+  if (coldSnaps.length) rows += `<tr><td>${iconOf("coldSnap", 22)}Cold Snap</td><td class="num">—</td><td class="num">${coldSnaps.map(fmtT).join(", ")}</td><td></td></tr>`;
+  el("wcl-review").innerHTML = `
+    <p class="note" style="margin-top:14px"><b style="color:var(--gold)">${esc(kill.boss)}</b> ${esc(kill.when)} · ${fmtT(kill.dur)} kill —
+    your presses delivered <b style="color:${pct >= 97 ? "var(--good)" : "var(--warn)"}">${pct.toFixed(1)}%</b> of the optimal overlay
+    (gap ≈ <b>${(gap / plainCast).toFixed(1)}</b> effective casts). Optimal recomputed for this kill's real length and raid calls, with your current gear/kit inputs.</p>
+    <div class="tablebox"><table><thead><tr><th>Cooldown</th><th>Optimal plan</th><th>You pressed</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`;
+}
+async function wclRunReview(kill) {
+  const status = m => el("wcl-status").textContent = m;
+  const charName = el("wcl-char").value.trim();
+  if (!charName) { status("enter your character name for the review"); el("wcl-char").focus(); return; }
+  try {
+    const { actual, coldSnaps } = await wclReview(kill, charName, status);
+    if (!Object.keys(actual).length) { status("no cooldown presses found for that character in this fight"); return; }
+    status("scoring your presses vs the optimal…");
+    // Fair comparison: the fight is as it happened — real length, raid externals
+    // pinned where they actually landed (and EXCLUDED if they never came: you
+    // can't press someone else's Drums) — only YOUR buttons are re-optimized.
+    const base = readCfg();
+    const fixed = {};
+    const enabled = { ...base.enabled };
+    for (const k of ["bloodlust", "powerInfusion", "drums"]) {
+      if (actual[k]) { fixed[k] = actual[k].slice(); enabled[k] = true; }
+      else enabled[k] = false;
+    }
+    for (const k in actual) enabled[k] = true; // score what you actually used, even if untoggled
+    const cfg = { ...base, T: kill.dur, fixed, warnings: [], segments: null, coldSnap: base.coldSnap || coldSnaps.length > 0, enabled };
+    const actualR = simulate({ ...actual }, cfg);
+    const best = await optimizeAsync(cfg, 10, () => {});
+    const optR = simulate(best.s, cfg);
+    wclRenderReview(kill, actual, coldSnaps, cfg, actualR, optR, best);
+    status("");
+  } catch (err) {
+    status(String(err.message || err));
+  }
 }
 function wclRender(kills) {
   const byBoss = new Map();
@@ -3426,13 +3581,18 @@ function wclRender(kills) {
     let pinCell = pin !== null ? fmtT(pin) + (fact.lustAt != null ? " (learned)" : "") : "—";
     const stale = pin !== null && medLust !== null && Math.abs(medLust - pin) > 15;
     if (stale) pinCell += ` <span class="warntag">⚠ logs say ~${fmtT(medLust)}</span>`;
-    html += `<tr><td>${esc(boss)}</td><td class="num">${ks.map(k => fmtT(k.dur)).join(", ")}</td>` +
+    const killLinks = ks.map((k, ki) => `<a href="#" class="wcl-kill" data-boss="${esc(boss)}" data-ki="${ki}" title="Review this kill — your presses vs the optimal plan" style="color:var(--accent)">${fmtT(k.dur)}</a>`).join(", ");
+    html += `<tr><td>${esc(boss)}</td><td class="num">${killLinks}</td>` +
       `<td class="num">${lustCell}</td><td class="num">${pinCell}</td>` +
       `<td><button type="button" class="pinadd wcl-import" data-boss="${esc(boss)}" data-durs="${ks.map(k => k.dur).join(",")}"` +
       ` data-medlust="${medLust !== null ? medLust : ""}" data-meddur="${medDur}">${preset ? "→ preset + history" : "→ kill history"}</button></td></tr>`;
   }
   html += `</tbody></table>`;
   el("wcl-out").innerHTML = html;
+  el("wcl-out").querySelectorAll(".wcl-kill").forEach(a => a.addEventListener("click", e => {
+    e.preventDefault();
+    wclRunReview(byBoss.get(a.dataset.boss)[+a.dataset.ki]);
+  }));
   // One click teaches the tool this boss: kill durations feed the explorer's
   // history, and (for a known preset) the median kill length + real Lust second
   // are saved as fight facts the preset applies on every future load.
@@ -3474,11 +3634,30 @@ el("wcl-fetch").addEventListener("click", async () => {
     el("wcl-fetch").disabled = false;
   }
 });
+el("wcl-stats").addEventListener("click", async () => {
+  const id = el("wcl-id").value.trim(), secret = el("wcl-secret").value.trim();
+  const guildId = parseInt(el("wcl-guild").value, 10);
+  const charName = el("wcl-char").value.trim();
+  const status = m => el("wcl-status").textContent = m;
+  if (!id || !secret || !isFinite(guildId)) { status("fill in client id, secret and guild id"); return; }
+  if (!charName) { status("enter your character name"); el("wcl-char").focus(); return; }
+  el("wcl-stats").disabled = true;
+  try {
+    const c = wclCreds();
+    localStorage.setItem(WCL_KEY, JSON.stringify({ ...c, id, secret, char: charName }));
+    status(await wclFillStats(id, secret, guildId, charName, status));
+  } catch (err) {
+    status(String(err.message || err));
+  } finally {
+    el("wcl-stats").disabled = false;
+  }
+});
 // prefill saved credentials
 {
   const c = wclCreds();
   if (c.id) el("wcl-id").value = c.id;
   if (c.secret) el("wcl-secret").value = c.secret;
+  if (c.char) el("wcl-char").value = c.char;
 }
 
 /* ═══════════════ pressboard / follow ═══════════════ */
