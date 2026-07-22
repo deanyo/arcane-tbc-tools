@@ -427,6 +427,22 @@
   .capsheet .note { font-size: 12.5px; color: var(--muted); margin: 8px 0 4px; }
   .capsheet .tablebox { max-height: 420px; overflow-y: auto; }
   .capsheet td.capped { color: var(--warn); }
+  /* ————— kill-time explorer ————— */
+  .killx-bar { display: flex; align-items: center; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .killx-bar .kboss { font-size: 12.5px; color: var(--ink-2); }
+  .killx-bar .kboss b { color: var(--gold); font-weight: 600; }
+  .killx-bar input { width: 72px; padding: 4px 8px; font-size: 13px; }
+  .killx-bar input.bad { border-color: var(--warn); }
+  .killx-bar button {
+    background: var(--panel); border: 1px solid var(--grid); color: var(--ink-2);
+    border-radius: 6px; font-size: 12.5px; padding: 5px 10px; cursor: pointer;
+  }
+  .killx-bar button:hover { color: var(--ink); border-color: var(--accent); }
+  .killx-bar .kprog { font: 11.5px var(--font-mono); color: var(--muted); margin-left: auto; }
+  #killx-verdict { margin: 10px 0 0; }
+  #killx-verdict .up::before { content: "▲ "; color: var(--good); }
+  #killx-verdict .down::before { content: "▼ "; color: var(--warn); }
+  #killx-verdict .flat::before { content: "— "; color: var(--muted); }
   @media (prefers-reduced-motion: reduce) { .progress i { transition: none; } }
 </style>
 </head>
@@ -548,6 +564,22 @@
           <button class="copy" id="btn-copy">Copy as text</button>
         </div>
         <div class="tablebox" id="tablebox"></div>
+      </div>
+      <div class="viz" id="killx" hidden>
+        <h3>Kill-time explorer</h3>
+        <p class="note">Overlay gain re-optimized across nearby fight lengths. Cliffs mark where one more
+        cooldown use fits; dots on the axis are your logged kills — if they straddle a cliff, plan for the shorter side.</p>
+        <div class="chartbox" id="killx-box">
+          <div class="tip" id="killx-tip"></div>
+        </div>
+        <div class="sense" id="killx-verdict" hidden></div>
+        <div class="killx-bar">
+          <span class="kboss" id="killx-boss"></span>
+          <input id="killx-add" type="text" placeholder="m:ss" inputmode="numeric" aria-label="Add a logged kill time">
+          <button id="killx-addbtn" type="button" title="Record a kill time for this boss">Add kill</button>
+          <button id="killx-clear" type="button" title="Clear this boss's kill history">Clear</button>
+          <span class="kprog" id="killx-prog"></span>
+        </div>
       </div>
       <details class="capsheet" id="capsheet" hidden>
         <summary>Cap sheet — 3-stack Arcane Blast cast time per buff combo</summary>
@@ -2635,7 +2667,7 @@ function render(run) {
   wb.hidden = !run.cfg.warnings.length;
   wb.innerHTML = run.cfg.warnings.map(w => `<div>${esc(w)}</div>`).join("");
   pressPlan(run);
-  renderTiles(run); renderSensitivity(run); renderTimeline(run); renderSchedule(run); renderCapSheet(run.cfg); renderAssumptions(run);
+  renderTiles(run); renderSensitivity(run); renderTimeline(run); renderSchedule(run); renderKillExplorer(run); renderCapSheet(run.cfg); renderAssumptions(run);
   el("follow").hidden = false;
   followPrime(run);
   window.__run = run; // debug/test hook
@@ -3055,6 +3087,242 @@ function renderAssumptions({ cfg }) {
     <li>Buffs snapshot at cast start, and activations only fire at real press opportunities: with the pull, macroed into the next cast ("/cast Berserking /cast Arcane Blast" on the spam press as the previous cast ends), or freely while not casting (intermissions). A planned time that lands mid-cast fires at the next cast boundary, and cooldowns run from that real moment. Displayed times are the moments you press; when the buffs land on the next cast (or a cooldown lights up a beat into the spam), the row says so in words. Crits count as 182% — 2/2 Spell Power with a Chaotic Skyfire Diamond. (No toggle for the meta gem: a constant crit-damage factor scales every schedule equally, so it cannot change which overlay wins — only things that vary during the fight can.)</li>
   </ul>`;
 }
+
+/* ═══════════════ kill-time explorer ═══════════════ */
+// Re-optimizes the whole plan at nearby fight lengths and draws gain% vs kill
+// time, so "does kill time become an issue?" is a picture: cliffs are where one
+// more cooldown use fits (from unlockThresholds), dots are your logged kills.
+// Uses the engine strictly as a consumer — no scoring or search changes.
+const KILLX_KEY = "abp-kills";
+const killx = { seq: 0, cache: new Map(), samples: [], geo: null };
+function killxStore() { try { return JSON.parse(localStorage.getItem(KILLX_KEY) || "{}"); } catch (_) { return null; } }
+function killxSave(o) { try { localStorage.setItem(KILLX_KEY, JSON.stringify(o)); return true; } catch (_) { return false; } }
+function killxBossName() {
+  const chip = document.querySelector("#boss-chips .gchip.active") || document.querySelector("#golden-chips .gchip.active");
+  if (chip) return chip.textContent;
+  const pchip = document.querySelector("#preset-chips .pchip.active");
+  if (pchip) return pchip.childNodes[0].textContent;
+  return "Unsaved fight";
+}
+function killxKills(boss) {
+  const st = killxStore();
+  return (st && Array.isArray(st[boss])) ? st[boss].slice().sort((a, b) => a - b) : [];
+}
+// A cfg re-targeted to fight length T2: pins past the new kill are dropped
+// (that press never happens), phase rows are clamped, and the tail past the
+// old length becomes plain casting.
+function killxCfgAt(cfg, T2) {
+  const fixed = {};
+  for (const k in cfg.fixed) {
+    const ts = cfg.fixed[k].filter(t => t < T2 - 1);
+    if (ts.length) fixed[k] = ts;
+  }
+  let segments = null;
+  if (cfg.segments) {
+    segments = [];
+    for (const s of cfg.segments) {
+      if (s.start >= T2) break;
+      segments.push({ ...s, end: Math.min(s.end, T2) });
+    }
+    const last = segments[segments.length - 1];
+    if (last && last.end < T2 - 1e-9) segments.push({ start: last.end, end: T2, type: "normal", mult: 1, targets: 0 });
+    if (!segments.length) segments = null;
+  }
+  return { ...cfg, T: T2, fixed, segments, warnings: [] };
+}
+function killxSampleTs(cfg, lo, hi) {
+  const ts = new Set([lo, hi, Math.round(cfg.T)]);
+  for (let t = lo; t <= hi; t += 10) ts.add(t);
+  for (const bp of unlockThresholds(cfg)) {
+    const T2 = Math.round(bp.T);
+    for (const t of [T2 - 4, T2 - 1, T2 + 2]) if (t >= lo && t <= hi) ts.add(t);
+  }
+  return [...ts].sort((a, b) => a - b);
+}
+function renderKillExplorer(run) {
+  const { cfg } = run;
+  el("killx").hidden = false;
+  const boss = killxBossName();
+  el("killx-boss").innerHTML = `Kills for <b>${esc(boss)}</b>:`;
+  const tok = ++killx.seq;
+  killx.samples = [];
+  const lo = Math.max(30, Math.round(cfg.T) - 60), hi = Math.min(900, Math.round(cfg.T) + 90);
+  const want = killxSampleTs(cfg, lo, hi);
+  const ckey = JSON.stringify({ h: cfg.hasteRating, sp: cfg.sp, c: cfg.critPct, e: cfg.enabled, f: cfg.fixed, cs: cfg.coldSnap, sg: cfg.segments, T: cfg.T });
+  if (killx.cacheKey !== ckey) { killx.cache = new Map(); killx.cacheKey = ckey; }
+  killxDraw(run, lo, hi);
+  const prog = el("killx-prog");
+  let i = 0;
+  (function next() {
+    if (tok !== killx.seq) return; // a newer run took over
+    if (i >= want.length) { prog.textContent = ""; killxVerdict(run, lo, hi); return; }
+    const T2 = want[i++];
+    prog.textContent = `computing ${i}/${want.length}…`;
+    const done = pt => {
+      if (tok !== killx.seq) return;
+      killx.samples.push(pt);
+      killx.samples.sort((a, b) => a.T2 - b.T2);
+      killxDraw(run, lo, hi);
+      setTimeout(next, 0);
+    };
+    if (killx.cache.has(T2)) { done(killx.cache.get(T2)); return; }
+    const cfg2 = killxCfgAt(cfg, T2);
+    optimizeAsync(cfg2, 6, () => {}).then(best => {
+      const opt = simulate(best.s, cfg2).total;
+      const base = simulate({}, cfg2).total;
+      const pt = { T2, gain: base > 0 ? 100 * (opt / base - 1) : 0 };
+      killx.cache.set(T2, pt);
+      done(pt);
+    });
+  })();
+}
+function killxDraw(run, lo, hi) {
+  const { cfg } = run;
+  const pts = killx.samples;
+  const VW = 980, PADL = 64, PADR = 18, PADT = 16, PLOT_H = 170, AXIS_H = 30;
+  const H = PADT + PLOT_H + AXIS_H;
+  const plotW = VW - PADL - PADR;
+  const x = t => PADL + ((t - lo) / (hi - lo)) * plotW;
+  const C = getComputedStyle(document.documentElement), cv = n => (C.getPropertyValue(n) || "").trim();
+  const ink = cv("--ink") || "#eceaf6", ink2 = cv("--ink-2") || "#a6a3bd", muted = cv("--muted") || "#6f6c85";
+  const grid = cv("--grid") || "#262538", surf = cv("--panel") || "#191828", gold = cv("--gold") || "#d9b96a";
+  const accent = cv("--accent") || "#8b87d6", good = cv("--good") || "#4fae52", page = cv("--page") || "#0c0c14";
+  const gains = pts.map(p => p.gain);
+  let gMin = Math.min(...gains, run.optR.total && run.baseline.total ? 100 * (run.optR.total / run.baseline.total - 1) : 0);
+  let gMax = Math.max(...gains, gMin + 1);
+  const pad = Math.max(0.5, (gMax - gMin) * 0.15);
+  gMin = Math.max(0, gMin - pad); gMax += pad;
+  const y = g => PADT + PLOT_H - ((g - gMin) / (gMax - gMin)) * PLOT_H;
+  let sv = `<svg viewBox="0 0 ${VW} ${H}" width="100%" preserveAspectRatio="xMidYMid meet" font-family="system-ui,-apple-system,sans-serif" role="img" aria-label="Overlay gain versus fight length" style="display:block">`;
+  sv += `<rect x="${PADL}" y="${PADT}" width="${plotW}" height="${PLOT_H}" fill="${surf}" opacity="0.4" rx="5"/>`;
+  // y gridlines + labels (3 steps)
+  for (let k = 0; k <= 3; k++) {
+    const g = gMin + (k / 3) * (gMax - gMin);
+    sv += `<line x1="${PADL}" y1="${y(g).toFixed(1)}" x2="${VW - PADR}" y2="${y(g).toFixed(1)}" stroke="${grid}" stroke-width="1" opacity="0.6"/>`;
+    sv += `<text x="${PADL - 8}" y="${(y(g) + 4).toFixed(1)}" fill="${muted}" font-size="11" text-anchor="end">+${g.toFixed(1)}%</text>`;
+  }
+  // x ticks every 30s
+  const tick0 = Math.ceil(lo / 30) * 30;
+  for (let t = tick0; t <= hi; t += 30) {
+    sv += `<line x1="${x(t).toFixed(1)}" y1="${PADT}" x2="${x(t).toFixed(1)}" y2="${PADT + PLOT_H}" stroke="${grid}" stroke-width="1" opacity="0.4"/>`;
+    sv += `<text x="${x(t).toFixed(1)}" y="${H - AXIS_H + 18}" fill="${muted}" font-size="11" text-anchor="middle">${fmtT(t)}</text>`;
+  }
+  // breakpoint markers (grouped by second)
+  const bps = unlockThresholds(cfg).filter(b => b.T >= lo && b.T <= hi);
+  const bpGroups = new Map();
+  for (const b of bps) {
+    const sec = Math.round(b.T);
+    if (!bpGroups.has(sec)) bpGroups.set(sec, []);
+    bpGroups.get(sec).push(b);
+  }
+  let lane = 0;
+  for (const [sec, grp] of [...bpGroups.entries()].sort((a, b) => a[0] - b[0])) {
+    const bx = x(sec);
+    sv += `<line x1="${bx.toFixed(1)}" y1="${PADT}" x2="${bx.toFixed(1)}" y2="${PADT + PLOT_H}" stroke="${accent}" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.8"/>`;
+    const label = grp.map(g => `${ordinal(g.uses)} ${PRESS_CODE[g.key] || g.name}`).join(" + ");
+    const ly = PADT + 12 + (lane++ % 3) * 13; // stagger so neighboring labels don't collide
+    sv += `<text x="${(bx + 4).toFixed(1)}" y="${ly}" fill="${accent}" font-size="10.5" paint-order="stroke" stroke="${page}" stroke-width="3">${esc(label)}</text>`;
+  }
+  // planned kill time marker
+  sv += `<line x1="${x(cfg.T).toFixed(1)}" y1="${PADT}" x2="${x(cfg.T).toFixed(1)}" y2="${PADT + PLOT_H}" stroke="${gold}" stroke-width="1.5" opacity="0.9"/>`;
+  sv += `<text x="${x(cfg.T).toFixed(1)}" y="${PADT + PLOT_H - 6}" fill="${gold}" font-size="10.5" text-anchor="middle" paint-order="stroke" stroke="${page}" stroke-width="3">plan ${fmtT(cfg.T)}</text>`;
+  // gain curve
+  if (pts.length > 1) {
+    let path = "";
+    pts.forEach((p, i) => { path += `${i ? "L" : "M"}${x(p.T2).toFixed(1)} ${y(p.gain).toFixed(1)}`; });
+    sv += `<path d="${path}" fill="none" stroke="${ink}" stroke-width="2" stroke-linejoin="round"/>`;
+  }
+  // logged kills as dots on the axis line
+  const kills = killxKills(killxBossName());
+  for (const k of kills) {
+    if (k < lo || k > hi) continue;
+    sv += `<circle cx="${x(k).toFixed(1)}" cy="${(PADT + PLOT_H).toFixed(1)}" r="5" fill="${good}" stroke="${page}" stroke-width="1.5"><title>logged kill ${fmtT(k)}</title></circle>`;
+  }
+  const outside = kills.filter(k => k < lo || k > hi).length;
+  if (outside) sv += `<text x="${VW - PADR}" y="${H - AXIS_H + 18}" fill="${muted}" font-size="10.5" text-anchor="end">+${outside} kill${outside > 1 ? "s" : ""} off-range</text>`;
+  sv += `</svg>`;
+  const box = el("killx-box");
+  box.querySelectorAll("svg").forEach(s => s.remove());
+  box.insertAdjacentHTML("beforeend", sv);
+  killx.geo = { x, lo, hi, y, VW, PADL, PADR };
+  killxHookTip(run);
+}
+function killxHookTip(run) {
+  const box = el("killx-box"), tip = el("killx-tip"), svg = box.querySelector("svg");
+  if (!svg) return;
+  svg.addEventListener("mousemove", e => {
+    const g = killx.geo;
+    if (!g || !killx.samples.length) { tip.style.display = "none"; return; }
+    const r = svg.getBoundingClientRect();
+    const t = g.lo + (e.clientX - r.left - r.width * g.PADL / g.VW) / (r.width * (g.VW - g.PADL - g.PADR) / g.VW) * (g.hi - g.lo);
+    let s = killx.samples[0];
+    for (const p of killx.samples) if (Math.abs(p.T2 - t) < Math.abs(s.T2 - t)) s = p;
+    const cur = killx.samples.find(p => p.T2 === Math.round(run.cfg.T));
+    const d = cur ? s.gain - cur.gain : null;
+    tip.innerHTML = `<b>${fmtT(s.T2)}</b> · gain <b>+${s.gain.toFixed(1)}%</b>` +
+      (d !== null && s.T2 !== Math.round(run.cfg.T) ? ` · ${d >= 0 ? "+" : ""}${d.toFixed(1)}pp vs plan` : "");
+    tip.style.display = "block";
+    const bx = box.getBoundingClientRect();
+    tip.style.left = Math.min(e.clientX - bx.left + 14, bx.width - tip.offsetWidth - 8) + "px";
+    tip.style.top = (e.clientY - bx.top + 14) + "px";
+  });
+  svg.addEventListener("mouseleave", () => tip.style.display = "none");
+}
+function killxVerdict(run, lo, hi) {
+  const { cfg } = run;
+  const host = el("killx-verdict");
+  const kills = killxKills(killxBossName()).filter(k => k >= lo && k <= hi);
+  const bps = unlockThresholds(cfg).filter(b => b.T >= lo && b.T <= hi);
+  const bpLabel = sec => {
+    const grp = bps.filter(b => Math.abs(Math.round(b.T) - sec) < 1e-6);
+    return grp.map(g => `${ordinal(g.uses)} ${g.name}`).join(" + ");
+  };
+  const lines = [];
+  if (!kills.length) {
+    lines.push(`<div class="flat">No logged kills for this boss yet — add times below (or fetch them from Warcraft Logs) to see where your kills sit against the cliffs.</div>`);
+  } else {
+    const secs = [...new Set(bps.map(b => Math.round(b.T)))].sort((a, b) => a - b);
+    const straddled = secs.filter(s => kills.some(k => k < s) && kills.some(k => k >= s));
+    const kMin = kills[0], kMax = kills[kills.length - 1];
+    if (straddled.length) {
+      const s = straddled[straddled.length - 1];
+      lines.push(`<div class="down">Your kills (${kills.map(fmtT).join(", ")}) straddle the <b>${fmtT(s)}</b> breakpoint (${esc(bpLabel(s))}) — the plan changes depending on which side the kill lands. Plan for the shorter side and treat the extra use as a bonus if the fight drags.</div>`);
+    } else {
+      const above = secs.find(s => s > kMax);
+      const below = [...secs].reverse().find(s => s <= kMin);
+      if (above !== undefined && above - kMax <= 20) {
+        lines.push(`<div class="up">Your slowest kill (${fmtT(kMax)}) is only ${Math.round(above - kMax)}s short of the <b>${fmtT(above)}</b> breakpoint (${esc(bpLabel(above))}) — a slightly slow week flips the plan. Worth having both schedules ready.</div>`);
+      } else if (below !== undefined && kMin - below <= 15) {
+        lines.push(`<div class="down">Your fastest kill (${fmtT(kMin)}) is only ${Math.round(kMin - below)}s past the <b>${fmtT(below)}</b> breakpoint (${esc(bpLabel(below))}) — if the raid speeds up, that use stops fitting. Watch the fast side.</div>`);
+      } else {
+        lines.push(`<div class="flat">Your kills (${kills.map(fmtT).join(", ")}) sit clear of the cliffs — kill-time drift is not an issue for this plan.</div>`);
+      }
+    }
+    const planned = Math.round(cfg.T);
+    if (kMax < planned - 15 || kMin > planned + 15) {
+      lines.push(`<div class="down">The planned length (${fmtT(planned)}) is far from your logged kills — consider re-running at ${fmtT(Math.round(kills.reduce((a, b) => a + b, 0) / kills.length))} (your average).</div>`);
+    }
+  }
+  host.hidden = !lines.length;
+  host.innerHTML = lines.join("");
+}
+el("killx-addbtn").addEventListener("click", () => {
+  const entry = el("killx-add");
+  const t = parseLen(entry.value);
+  if (!isFinite(t) || t <= 0) { entry.classList.add("bad"); return; }
+  entry.classList.remove("bad");
+  const st = killxStore(); if (st === null) return;
+  const boss = killxBossName();
+  (st[boss] = st[boss] || []).push(Math.round(t));
+  if (killxSave(st)) { entry.value = ""; if (lastRun) { killxDraw(lastRun, killx.geo.lo, killx.geo.hi); killxVerdict(lastRun, killx.geo.lo, killx.geo.hi); } }
+});
+el("killx-add").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); el("killx-addbtn").click(); } });
+el("killx-add").addEventListener("input", () => el("killx-add").classList.remove("bad"));
+el("killx-clear").addEventListener("click", () => {
+  const st = killxStore(); if (st === null) return;
+  delete st[killxBossName()];
+  if (killxSave(st) && lastRun) { killxDraw(lastRun, killx.geo.lo, killx.geo.hi); killxVerdict(lastRun, killx.geo.lo, killx.geo.hi); }
+});
 
 /* ═══════════════ pressboard / follow ═══════════════ */
 const PRESS_CODE = {
