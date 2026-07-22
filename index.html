@@ -3425,12 +3425,16 @@ async function wclActor(token, code, charName) {
 // standard raiding-arcane constants, so it's an estimate — shown as such.
 const WCL_CRIT_RATING_PER_PCT = 22.08; // at 70
 const WCL_MAGE_BASE_CRIT = 0.91, WCL_INT_PER_CRIT = 80;
-// Flat percent spell-crit auras detectable in combatantinfo.auras
+// Flat percent spell-crit auras detectable in combatantinfo.auras (IDs
+// Wowhead-verified). Rating-based buffs (Songflower, Power of the Guardian)
+// are deliberately absent — they're already inside critSpell; aura-granted
+// int (Brilliance, Kings, GotW) is likewise already in the intellect snapshot.
 const WCL_CRIT_AURAS = [
   { id: 30482, pct: 3, name: "Molten Armor" },           // mage self-buff
   { id: 24907, pct: 5, name: "Moonkin Aura" },           // balance druid party aura
-  { id: 30708, pct: 3, name: "Totem of Wrath" },         // elemental shaman
-  { id: 34460, pct: 2, name: "Twilight Owl" },           // JC neck (Chain of the Twilight Owl)
+  { id: 30708, pct: 3, name: "Totem of Wrath" },         // elemental shaman (also +3% hit)
+  { id: 31035, pct: 2, name: "Twilight Owl" },           // JC neck party buff (Chain of the Twilight Owl)
+  { id: 28508, pct: 2, name: "Destruction Potion" },     // only if pre-potted at pull
 ];
 async function wclFillStats(id, secret, guildId, charName, status) {
   const token = await wclToken(id, secret);
