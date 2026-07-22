@@ -609,7 +609,12 @@
       </details>
   </section>
 
-  <footer class="assump" id="assump" hidden></footer>
+  <footer class="assump" id="assump" hidden>
+    <h4>Model assumptions</h4>
+    <p>Steady 3-stack Arcane Blast, continuous cast-rate scoring, GCD floor at 1.0s, Anniversary Sated/Tinnitus rules,
+    pins as hard anchors, mana not simulated. The full write-up — every rule the engine follows and everything it
+    deliberately leaves out — lives on the <a href="assumptions.html" style="color:var(--accent)">assumptions page</a>.</p>
+  </footer>
 </div>
 
 <script>
@@ -3086,26 +3091,10 @@ function renderCapSheet(cfg) {
   html += `</tbody></table>`;
   el("capbox").innerHTML = html;
 }
+// Full assumptions text lives in assumptions.html — keep the two in sync
+// when engine behavior changes. The in-page footer is a one-paragraph summary.
 function renderAssumptions({ cfg }) {
-  const a = el("assump"); a.hidden = false;
-  a.innerHTML = `<h4>Model assumptions</h4><ul>
-    <li>Rotation: continuous Arcane Blast spam; the AB debuff (−1/3s base cast, +75% mana per stack, max 3) is at 3 stacks after the opener. Cast time = (2.5 − 1/3·stacks) / total haste; next cast starts at max(cast time, hasted GCD), GCD floor 1.0s.</li>
-    <li>Haste stacking: all haste rating adds first (${GAME.HASTE_RATING_PER_PCT} rating = 1% at 70), then multiplies with each %-speed buff: (1+rating%) × 1.30<small>BL</small> × 1.20<small>IV</small> × 1.10<small>Zerk</small>.</li>
-    <li>Ashtongue Talisman is tracked per cast: the chance the 145-haste proc is up right now comes from your actual casts in the last 5s (procs cluster inside fast windows), and the GCD floor is applied separately to the proc-up and proc-down cases before averaging — not smeared into a flat average.</li>
-    <li>Serpent-Coil Braid: the Mana Emerald is conjured pre-combat with 3 charges — at most 3 gem windows per fight, 2 minutes apart (re-conjuring mid-fight isn’t modeled; not worth the mana).</li>
-    <li>The objective is equivalent to maximizing <em>effective casts</em>: each cast counts 1.0, ×1.3 under Arcane Power, ×(720+0.714·(SP+bonus))/(720+0.714·SP) under a spellpower active (the bonus flows through the spell coefficient, so +225 ≈ ×1.10 at 1150 SP, not ×1.20), and ×N in Burn phases. Crit multiplies every cast equally and cancels out — <em>except</em> in AoE, where Clearcasting → Arcane Potency procs more often (Arcane Concentration rolls per hit, so more targets ⇒ more procs ⇒ Potency's crit bonus is up more), giving a small target-scaled damage boost the planner credits from your crit input. AoE casts are otherwise counted in the same plain-AB unit; gear on-crit spellpower procs (e.g. Tirisfal 4pc) are left unmodeled.</li>
-    <li>Going past the 50% GCD floor is not treated as a mistake — the planner simulates actual casts, so it will happily overcap a window (especially under Arcane Power) when that beats staying under the line. The floor line just marks where extra haste stops adding casts.</li>
-    <li>Any pinned times are hard anchors: a buff with times entered fires at exactly those times (validated against its cooldown, Sated/Tinnitus, Cold Snap, and the trinket lockout) and the planner schedules everything unpinned around them. Blank = the planner owns that buff.</li>
-    <li>Full durations are preferred — the sim naturally slides a press earlier when that covers the same casts and finishes before the kill — but a cooldown that's back up before the boss dies is always pressed: a clipped final window is free damage, and the schedule tags its real uptime and worth. Raid-called times are used exactly as entered.</li>
-    <li>The kill time is planned as <em>known</em>, with a half-cast (0.5s) of smoothing at the buzzer: the continuous model credits the final partial cast by its fraction, so terminal bursts are placed to end right at the kill instead of gambling on squeezing one more cast under the wire. Dying early is your live call — pop the remaining cooldowns sooner. A razor-timed line that would sim higher at exactly the entered second is shown as a note, not baked into the plan; the damage tiles show the plain at-kill total.</li>
-    <li>Ties break toward the natural, overlaid line: when spots are within one expected cast, the planner prefers a window that completes before the kill, then a press anchored to something you can see (the pull, a raid call, a co-press, a buff ending, a cooldown lighting back up), then one that avoids floor-dead seconds, then one that joins an existing press row, then the one that overlays the most other buff windows — stacked windows keep their value when the fight drifts a few seconds off plan; perfectly-tiled ones don't. Anything deliberately scattered carries a price tag saying what the grouped press would cost. A Cold Snap whose reset only buys a clipped final Icy Veins is still spent: a ready cooldown near the kill is free damage. So is a free reset that only <em>re-sequences</em> the same Icy Veins uses for a real gain — letting the opener lay its haste buffs sequentially inside Bloodlust (instead of stacking them over the floor), or spreading a banked Icy Veins back onto its natural cooldown tick — since on a fight with no better use for it, any real gain beats holding it. A reset that <em>adds</em> an extra mid-fight Icy Veins window must clear a full cast to be worth the scarce cooldown.</li>
-    <li>Power Infusion does not stack with Bloodlust (Bloodlust wins while both are up). Skull of Gul’dan and Mind Quickening Gem share the offensive-trinket lockout: using one locks the other for the used buff’s duration. Drums obey Anniversary Tinnitus (one drum buff per 2 min); Bloodlust obeys Anniversary Sated (raid-wide, one per 10 min of a pull, resets on boss kill).</li>
-    <li>Rotation is modeled as continuous AB spam. Real play conserves (AB×3 + Frostbolt filler) between windows — that changes absolute DPS, not which overlay wins, so the schedule stands either way.</li>
-    <li>Arcane Blast is modeled at a steady 3 stacks (1.5s base). The opening/post-gap ramp — the first few casts at 0/1/2 stacks — is measured to be worth zero extra casts below ~400 haste rating and a single quantized cast only far past the GCD floor, and every candidate plan pays it equally, so it never changes which overlay wins. Dropping it keeps the plans natural (no phantom “triple-stack the pull for the ramp” incentive) while the real lever — not parking a multiplicative haste buff on already-floored casts (e.g. Icy Veins inside Bloodlust once geared) — is fully kept.</li>
-    <li>Complicated fights: intermissions score zero damage (cooldowns and buff durations keep ticking — the planner holds cooldowns to recover through downtime); Burn phases multiply Arcane Blast damage; AoE phases switch to Arcane Explosion spam — instant, GCD-bound (haste pays to the 1.0s floor) and damage scaling with target count. Phases apply per cast start.</li>
-    <li>Mana is not simulated — the planner assumes you can afford to chain-cast through the windows it picks (gems, potions, Evocation are yours to manage). Treat late-fight Arcane Power and gem placements with care on mana-tight fights: AP's +30% cost and the gem's mana role are outside the model.</li>
-    <li>Buffs snapshot at cast start, and activations only fire at real press opportunities: with the pull, macroed into the next cast ("/cast Berserking /cast Arcane Blast" on the spam press as the previous cast ends), or freely while not casting (intermissions). A planned time that lands mid-cast fires at the next cast boundary, and cooldowns run from that real moment. Displayed times are the moments you press; when the buffs land on the next cast (or a cooldown lights up a beat into the spam), the row says so in words. Crits count as 182% — 2/2 Spell Power with a Chaotic Skyfire Diamond. (No toggle for the meta gem: a constant crit-damage factor scales every schedule equally, so it cannot change which overlay wins — only things that vary during the fight can.)</li>
-  </ul>`;
+  el("assump").hidden = false;
 }
 
 /* ═══════════════ kill-time explorer ═══════════════ */
