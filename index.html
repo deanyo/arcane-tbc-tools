@@ -3368,16 +3368,19 @@ window.GOLDEN_PRESETS = GOLDEN_PRESETS;
 // The actual current-phase raid bosses (fight length, Lust timing, and phases/AoE from the real
 // pulls — the user's logs). Same shape and same load-input-only behaviour as the debugging presets;
 // tests/exact-match.mjs locks these too. Times in seconds.
+// Fight lengths from the July 2026 kills (fresh.warcraftlogs.com guild 807668).
+// Phase rows carry over from the earlier pulls — re-log them if a fight's shape drifts.
 const BOSS_PRESETS = [
-  { name: "Hydross the Unstable", T: 100, pins: { bloodlust: [7] } },
-  { name: "The Lurker Below", T: 160, pins: { bloodlust: [7] }, intermission: [90, 130] },
-  { name: "Leotheras the Blind", T: 135, pins: { bloodlust: [25] }, phases: [
+  { name: "Hydross the Unstable", T: 113, pins: { bloodlust: [7] } },
+  // 1:54 kill lands before the first submerge completes — no intermission at this speed
+  { name: "The Lurker Below", T: 114, pins: { bloodlust: [7] } },
+  { name: "Leotheras the Blind", T: 204, pins: { bloodlust: [25] }, phases: [
     { type: "intermission", from: 10, to: 15 },
     { type: "intermission", from: 70, to: 80 },
   ] },
-  { name: "Fathom-lord Karathress", T: 120, pins: { bloodlust: [5] } },
-  { name: "Morogrim Tidewalker", T: 165, pins: { bloodlust: [5] } },
-  { name: "Lady Vashj", T: 390, pins: { bloodlust: [345] }, phases: [
+  { name: "Fathom-lord Karathress", T: 151, pins: { bloodlust: [5] } },
+  { name: "Morogrim Tidewalker", T: 176, pins: { bloodlust: [5] } },
+  { name: "Lady Vashj", T: 411, pins: { bloodlust: [345] }, phases: [
     { type: "intermission", from: 50, to: 110 },
     { type: "intermission", from: 140, to: 150 },
     { type: "intermission", from: 165, to: 180 },
@@ -3385,15 +3388,15 @@ const BOSS_PRESETS = [
     { type: "intermission", from: 265, to: 290 },
     { type: "intermission", from: 310, to: 325 },
   ] },
-  { name: "Al'ar", T: 240, pins: { bloodlust: [6] }, phases: [
+  { name: "Al'ar", T: 267, pins: { bloodlust: [6] }, phases: [
     { type: "intermission", from: 65, to: 69 },
     { type: "intermission", from: 95, to: 112 },
     { type: "intermission", from: 154, to: 166 },
     { type: "intermission", from: 208, to: 229 },
   ] },
-  { name: "Void Reaver", T: 145, pins: { bloodlust: [10] } },
-  { name: "High Astromancer Solarian", T: 75, pins: { bloodlust: [5] }, intermission: [50, 55] },
-  { name: "Kael'thas Sunstrider", T: 420, pins: { bloodlust: [260] }, phases: [
+  { name: "Void Reaver", T: 149, pins: { bloodlust: [10] } },
+  { name: "High Astromancer Solarian", T: 130, pins: { bloodlust: [5] }, intermission: [50, 55] },
+  { name: "Kael'thas Sunstrider", T: 451, pins: { bloodlust: [260] }, phases: [
     { type: "intermission", from: 15, to: 30 },
     { type: "intermission", from: 42, to: 55 },
     { type: "intermission", from: 69, to: 80 },
@@ -3403,6 +3406,37 @@ const BOSS_PRESETS = [
     { type: "intermission", from: 306, to: 346 },
   ] },
 ];
+/* T6 groundwork (Hyjal / Black Temple, Anniversary P3) — fight shapes from research,
+   lengths are guild-speed ESTIMATES until we have logs. Move entries into BOSS_PRESETS
+   and set real T / phase rows once the guild logs them. See GitHub issue #1 for the
+   engine features some of these want (silence windows, shield-immunity cycles).
+const T6_DRAFT_PRESETS = [
+  { name: "Rage Winterchill", T: 180, pins: { bloodlust: [5] } },           // pure burn, ~full uptime
+  { name: "Anetheron", T: 210, pins: { bloodlust: [5] } },                  // Sleep = random 10s downtime
+  { name: "Kaz'rogal", T: 200, pins: { bloodlust: [5] } },                  // mana race — everything in the opener
+  { name: "Azgalor", T: 260, pins: { bloodlust: [5] } },                    // 5s raid silence every ~15s (needs engine support)
+  { name: "Archimonde", T: 420, pins: { bloodlust: [5] } },                 // 9-min enrage; fears every ~40s
+  { name: "High Warlord Naj'entus", T: 240, pins: { bloodlust: [5] }, phases: [
+    { type: "intermission", from: 60, to: 75 },                             // Tidal Shield ~every 60s, ~5-20s each
+    { type: "intermission", from: 135, to: 150 },
+    { type: "intermission", from: 210, to: 225 },
+  ] },
+  { name: "Supremus", T: 300, pins: { bloodlust: [5] } },                   // 60s tank / 60s kite alternation (kite = degraded, not zero)
+  { name: "Shade of Akama", T: 150, pins: { bloodlust: [95] }, intermission: [0, 90] }, // adds until release, then short burn
+  { name: "Teron Gorefiend", T: 210, pins: { bloodlust: [5] } },            // full uptime (Ice Block dodges Shadow of Death)
+  { name: "Gurtogg Bloodboil", T: 330, pins: { bloodlust: [65] } },         // Fel Rage burn windows at ~60/150/240s
+  { name: "Reliquary of Souls", T: 480, pins: { bloodlust: [330] }, phases: [
+    { type: "intermission", from: 120, to: 165 },                           // essence transitions (add waves)
+    { type: "intermission", from: 285, to: 330 },
+  ] },
+  { name: "Mother Shahraz", T: 210, pins: { bloodlust: [5] } },             // Fatal Attraction movement only
+  { name: "Illidari Council", T: 390, pins: { bloodlust: [5] } },           // shared health pool, long sustained
+  { name: "Illidan Stormrage", T: 600, pins: { bloodlust: [130] }, phases: [
+    { type: "intermission", from: 120, to: 125 },                           // P2 flight: flames targetable (Lust here)
+    { type: "intermission", from: 460, to: 490 },                           // 30% cutscene
+  ] },
+];
+*/
 window.BOSS_PRESETS = BOSS_PRESETS;
 window.GOLDEN_DEFAULTS = GOLDEN_DEFAULTS;
 // Convert a preset's raw setup into the UI's applyState() shape (m:ss strings, buff toggles).
