@@ -475,6 +475,7 @@
       <span class="psave">
         <input id="preset-name" type="text" placeholder="Save as…" aria-label="Preset name">
         <button id="preset-save" title="Save the current setup under this name">Save</button>
+        <button id="btn-reset" title="Reset the fight and character inputs to factory defaults (saved presets and learned data are kept)">Reset</button>
       </span>
     </div>
     <div class="setup-grid">
@@ -3424,7 +3425,13 @@ async function wclActor(token, code, charName) {
 // standard raiding-arcane constants, so it's an estimate — shown as such.
 const WCL_CRIT_RATING_PER_PCT = 22.08; // at 70
 const WCL_MAGE_BASE_CRIT = 0.91, WCL_INT_PER_CRIT = 80;
-const WCL_MOLTEN_ARMOR = 30482; // +3% spell crit if up at pull
+// Flat percent spell-crit auras detectable in combatantinfo.auras
+const WCL_CRIT_AURAS = [
+  { id: 30482, pct: 3, name: "Molten Armor" },           // mage self-buff
+  { id: 24907, pct: 5, name: "Moonkin Aura" },           // balance druid party aura
+  { id: 30708, pct: 3, name: "Totem of Wrath" },         // elemental shaman
+  { id: 34460, pct: 2, name: "Twilight Owl" },           // JC neck (Chain of the Twilight Owl)
+];
 async function wclFillStats(id, secret, guildId, charName, status) {
   const token = await wclToken(id, secret);
   status("finding your latest kill…");
@@ -3444,13 +3451,19 @@ async function wclFillStats(id, secret, guildId, charName, status) {
     const ci = (rep.ci.data || []).find(e => e.type === "combatantinfo");
     if (!ci) throw new Error("no combatant info for that character in the latest kill");
     const firstCast = (rep.casts.data || []).find(e => e.type === "cast" && e.spellPower > 0);
-    const moltenUp = (ci.auras || []).some(a => a.ability === WCL_MOLTEN_ARMOR);
+    const auras = ci.auras || [];
+    let critBonusPct = 0;
+    const critSources = [];
+    for (const def of WCL_CRIT_AURAS) {
+      if (auras.some(a => a.ability === def.id)) { critBonusPct += def.pct; critSources.push(def.name); }
+    }
     const crit = WCL_MAGE_BASE_CRIT + (ci.intellect || 0) / WCL_INT_PER_CRIT +
-      (ci.critSpell || 0) / WCL_CRIT_RATING_PER_PCT + (moltenUp ? 3 : 0);
+      (ci.critSpell || 0) / WCL_CRIT_RATING_PER_PCT + critBonusPct;
     const filled = [];
     if (firstCast) { el("in-sp").value = firstCast.spellPower; filled.push(`${firstCast.spellPower} spell damage`); }
     el("in-haste").value = ci.hasteSpell || 0; filled.push(`${ci.hasteSpell || 0} haste rating`);
-    el("in-crit").value = (Math.round(crit * 2) / 2).toFixed(1); filled.push(`~${(Math.round(crit * 2) / 2).toFixed(1)}% crit (rating + int${moltenUp ? " + Molten Armor" : ""} — estimate, nudge if your sheet disagrees)`);
+    const critLabel = critSources.length ? ` + ${critSources.join(" + ")}` : "";
+    el("in-crit").value = (Math.round(crit * 2) / 2).toFixed(1); filled.push(`~${(Math.round(crit * 2) / 2).toFixed(1)}% crit (rating + int${critLabel} — estimate, nudge if your sheet disagrees)`);
     el("in-haste").dispatchEvent(new Event("input"));
     markPresetDirty();
     return `filled from ${charName}'s latest kill: ${filled.join(", ")}`;
@@ -3939,6 +3952,19 @@ el("preset-save").addEventListener("click", () => {
   if (lsSet(store)) { refreshPresets(name); el("preset-name").value = ""; }
 });
 el("preset-name").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); el("preset-save").click(); } });
+// Reset the working inputs to factory defaults. Saved custom presets, kill
+// history, learned fight facts, and WCL credentials are deliberately kept —
+// this un-messes the current setup, it doesn't forget what the tool learned.
+const FACTORY_STATE = {
+  enabled: { bloodlust: true, icyVeins: true, drums: true, ati: false, skull: true, arcanePower: true, scb: true, berserking: false, mqg: false, powerInfusion: false, isc: false },
+  coldSnap: true, times: {}, complicated: false, phases: [],
+  haste: "0", len: "5:00", sp: "1150", crit: "25",
+};
+el("btn-reset").addEventListener("click", () => {
+  applyState(JSON.parse(JSON.stringify(FACTORY_STATE)));
+  refreshPresets("");
+  clearGoldenActive();
+});
 
 /* ═══════════════ debugging presets (baked-in, = the exact-match suite) ═══════════════ */
 // A preset carries ONLY a fight's INPUT setup (length, Lust pin, phases, gear, kit) —
