@@ -581,6 +581,21 @@
           <span class="kprog" id="killx-prog"></span>
         </div>
       </div>
+      <details class="capsheet" id="wclpanel">
+        <summary>Warcraft Logs — fetch guild kill times</summary>
+        <p class="note">Pulls your guild's recent kills (durations + when Bloodlust actually went out) straight from
+        the Warcraft Logs API into the kill-time explorer. Needs a free API client from
+        <a href="https://www.warcraftlogs.com/api/clients" target="_blank" rel="noopener" style="color:var(--accent)">warcraftlogs.com/api/clients</a> —
+        credentials stay in this browser's localStorage only. Anyone with your secret can spend your API quota, so don't reuse a shared one.</p>
+        <div class="killx-bar">
+          <input id="wcl-id" type="text" placeholder="client id" autocomplete="off" style="width:170px">
+          <input id="wcl-secret" type="password" placeholder="client secret" autocomplete="off" style="width:170px">
+          <input id="wcl-guild" type="text" placeholder="guild id" inputmode="numeric" style="width:90px" value="807668">
+          <button id="wcl-fetch" type="button">Fetch recent kills</button>
+          <span class="kprog" id="wcl-status"></span>
+        </div>
+        <div class="tablebox" id="wcl-out"></div>
+      </details>
       <details class="capsheet" id="capsheet" hidden>
         <summary>Cap sheet — 3-stack Arcane Blast cast time per buff combo</summary>
         <p class="note">Every combination (up to 3 at a time) of your enabled haste buffs, at your gear rating.
@@ -3323,6 +3338,131 @@ el("killx-clear").addEventListener("click", () => {
   delete st[killxBossName()];
   if (killxSave(st) && lastRun) { killxDraw(lastRun, killx.geo.lo, killx.geo.hi); killxVerdict(lastRun, killx.geo.lo, killx.geo.hi); }
 });
+
+/* ═══════════════ warcraftlogs (POC) ═══════════════ */
+// v2 GraphQL, client-credentials — works from a static page (CORS is open on
+// both endpoints). Fetches recent guild kills: duration + when Bloodlust/Heroism
+// actually went out, feeds the kill history, and flags presets whose pinned
+// Lust time disagrees with how the guild actually plays the fight.
+const WCL_KEY = "abp-wcl";
+const WCL_LUST_IDS = [2825, 32182]; // Bloodlust / Heroism
+function wclCreds() { try { return JSON.parse(localStorage.getItem(WCL_KEY) || "{}"); } catch (_) { return {}; } }
+const wclNorm = s => String(s).toLowerCase().replace(/[^a-z0-9]/g, "");
+function wclPresetFor(name) {
+  const n = wclNorm(name);
+  return BOSS_PRESETS.find(p => wclNorm(p.name) === n) || null;
+}
+async function wclToken(id, secret) {
+  const c = wclCreds();
+  if (c.token && c.tokenId === id && c.exp && Date.now() < c.exp - 60000) return c.token;
+  const res = await fetch("https://www.warcraftlogs.com/oauth/token", {
+    method: "POST",
+    headers: { Authorization: "Basic " + btoa(id + ":" + secret), "Content-Type": "application/x-www-form-urlencoded" },
+    body: "grant_type=client_credentials",
+  });
+  if (!res.ok) throw new Error(`token request failed (${res.status}) — check the client id/secret`);
+  const j = await res.json();
+  localStorage.setItem(WCL_KEY, JSON.stringify({ id, secret, token: j.access_token, tokenId: id, exp: Date.now() + (j.expires_in || 3600) * 1000 }));
+  return j.access_token;
+}
+async function wclQuery(token, query, variables) {
+  const res = await fetch("https://www.warcraftlogs.com/api/v2/client", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + token, "Content-Type": "application/json" },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) throw new Error(`API request failed (${res.status})`);
+  const j = await res.json();
+  if (j.errors) throw new Error(j.errors[0].message);
+  return j.data;
+}
+async function wclFetchKills(id, secret, guildId, status) {
+  const token = await wclToken(id, secret);
+  status("fetching report list…");
+  const list = await wclQuery(token, `query($g:Int){reportData{reports(guildID:$g, limit:6){data{code startTime endTime}}}}`, { g: guildId });
+  const reports = (list.reportData.reports.data || []);
+  const kills = []; // {boss, dur, lustAt|null, when}
+  for (const [i, r] of reports.entries()) {
+    status(`reading report ${i + 1}/${reports.length}…`);
+    const d = await wclQuery(token, `query($c:String!, $end:Float!){reportData{report(code:$c){
+      fights(killType: Kills){encounterID name startTime endTime}
+      events(dataType: Casts, startTime: 0, endTime: $end, filterExpression: "ability.id IN (${WCL_LUST_IDS.join(",")})", limit: 300){data}
+    }}}`, { c: r.code, end: r.endTime - r.startTime });
+    const rep = d.reportData.report;
+    const lusts = (rep.events.data || []).filter(e => e.type === "cast").map(e => e.timestamp);
+    for (const f of rep.fights || []) {
+      if (!f.encounterID) continue; // trash
+      const lust = lusts.find(ts => ts >= f.startTime && ts <= f.endTime);
+      kills.push({
+        boss: f.name,
+        dur: Math.round((f.endTime - f.startTime) / 1000),
+        lustAt: lust !== undefined ? Math.round((lust - f.startTime) / 1000) : null,
+        when: new Date(r.startTime + f.startTime).toISOString().slice(0, 10),
+      });
+    }
+  }
+  return kills;
+}
+function wclRender(kills) {
+  const byBoss = new Map();
+  for (const k of kills) {
+    if (!byBoss.has(k.boss)) byBoss.set(k.boss, []);
+    byBoss.get(k.boss).push(k);
+  }
+  const median = a => { const s = a.slice().sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+  let html = `<table><thead><tr><th>Boss</th><th>Kills</th><th>Lust went out</th><th>Preset pin</th><th></th></tr></thead><tbody>`;
+  for (const [boss, ks] of byBoss) {
+    const preset = wclPresetFor(boss);
+    const pin = preset && preset.pins && preset.pins.bloodlust ? preset.pins.bloodlust[0] : null;
+    const lusted = ks.filter(k => k.lustAt !== null);
+    const medLust = lusted.length ? median(lusted.map(k => k.lustAt)) : null;
+    // flag when the preset's pinned call disagrees with how the guild actually lusts
+    let lustCell = medLust !== null ? `~${fmtT(medLust)}` : `<span class="warntag">not seen</span>`;
+    let pinCell = pin !== null ? fmtT(pin) : "—";
+    if (pin !== null && medLust !== null && Math.abs(medLust - pin) > 15) {
+      pinCell += ` <span class="warntag">⚠ logs say ~${fmtT(medLust)} — update the preset's pin</span>`;
+    }
+    html += `<tr><td>${esc(boss)}</td><td class="num">${ks.map(k => fmtT(k.dur)).join(", ")}</td>` +
+      `<td class="num">${lustCell}</td><td class="num">${pinCell}</td>` +
+      `<td><button type="button" class="pinadd wcl-import" data-boss="${esc(boss)}" data-durs="${ks.map(k => k.dur).join(",")}">→ kill history</button></td></tr>`;
+  }
+  html += `</tbody></table>`;
+  el("wcl-out").innerHTML = html;
+  el("wcl-out").querySelectorAll(".wcl-import").forEach(b => b.addEventListener("click", () => {
+    const st = killxStore(); if (st === null) return;
+    const preset = wclPresetFor(b.dataset.boss);
+    const boss = preset ? preset.name : b.dataset.boss; // store under the preset's name so the chart finds it
+    const cur = new Set(st[boss] || []);
+    for (const d of b.dataset.durs.split(",").map(Number)) cur.add(d);
+    st[boss] = [...cur];
+    if (killxSave(st)) {
+      b.textContent = "added ✓";
+      if (lastRun && killx.geo) { killxDraw(lastRun, killx.geo.lo, killx.geo.hi); killxVerdict(lastRun, killx.geo.lo, killx.geo.hi); }
+    }
+  }));
+}
+el("wcl-fetch").addEventListener("click", async () => {
+  const id = el("wcl-id").value.trim(), secret = el("wcl-secret").value.trim();
+  const guildId = parseInt(el("wcl-guild").value, 10);
+  const status = m => el("wcl-status").textContent = m;
+  if (!id || !secret || !isFinite(guildId)) { status("fill in client id, secret and guild id"); return; }
+  el("wcl-fetch").disabled = true;
+  try {
+    const kills = await wclFetchKills(id, secret, guildId, status);
+    status(kills.length ? `${kills.length} kills found` : "no kills in the recent reports");
+    wclRender(kills);
+  } catch (err) {
+    status(String(err.message || err));
+  } finally {
+    el("wcl-fetch").disabled = false;
+  }
+});
+// prefill saved credentials
+{
+  const c = wclCreds();
+  if (c.id) el("wcl-id").value = c.id;
+  if (c.secret) el("wcl-secret").value = c.secret;
+}
 
 /* ═══════════════ pressboard / follow ═══════════════ */
 const PRESS_CODE = {
